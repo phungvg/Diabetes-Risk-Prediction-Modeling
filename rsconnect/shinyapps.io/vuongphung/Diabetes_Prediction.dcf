@@ -1,0 +1,13 @@
+name: Diabetes_Prediction
+title: Diabetes_Prediction
+username: vuongphung
+account: vuongphung
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 16187583
+bundleId: 11243782
+url: https://vuongphung.shinyapps.io/Diabetes_Prediction/
+version: 1
+asMultiple: FALSE
+asStatic: FALSE
+ignoredFiles: .RDataTmp|.RDataTmp1|CVD.csv|DataDescription.pdf|debug_app.R|Diabetes_BRFSS2015.csv|diabetes_data.csv|final_Project.html|final_Project.Rmd|PCD Diabetes.pdf|stroke_data.csv|test.R|test2.R|test3.R

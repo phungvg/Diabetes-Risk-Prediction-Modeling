@@ -1,0 +1,432 @@
+---
+title: "final_Project_BSTT527"
+author: "Phung Vuong"
+date: "2025-11-23"
+output: html_document
+---
+setwd("/Users/panda/Documents/School/UIC/Semester/Now/Fall 2025/BSTT_527/Final Project/")
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning=FALSE,message = FALSE)
+```
+
+**Investigating**
+
+Diabetes: Logistic Regression, SVM, Decision tree, Random Forest, Naives Bayes
+
+
+# Part 1
+##########################
+# (1) -- Load data
+##########################
+``` {r library}
+library(readr)
+library(dplyr)
+library(caret)
+library(e1071)  #  SVM 
+library(rpart)  #  Decision Tree
+library(randomForest)
+library(pROC)   # ROC,AUC
+library(rpart.plot)
+library(tree)
+library(ggplot2)
+library(klaR)
+library(tidyverse)
+library(dplyr)
+```
+
+``` {r load data}
+data <- read.csv('diabetes_data.csv', header=TRUE)
+colnames(data)
+str(data)
+nrow(data);ncol(data)
+```
+
+
+
+
+####################################
+# (2) -- Convert target to categorical
+####################################
+``` {r convert target}
+data$Diabetes <- factor(data$Diabetes,
+                        levels= c(0,1),
+                        labels =c("No","Yes"))
+# data$Diabetes
+#Check NA
+sum(is.na(data))
+data <- na.omit(data)
+```
+
+``` {r summary stat}
+table(data$Diabetes)
+```
+
+####################################
+# (3) -- Statistical analysis
+####################################
+``` {r statistical analysis}
+#Main numerical variables
+numerical_var <- c("Age","BMI", "GenHlth", "MentHlth", "PhysHlth")
+summary(data)
+main <- data %>%
+  summarise(
+    across(
+      all_of(numerical_var),
+      list(
+        mean  = ~mean(., na.rm = TRUE),
+        median = ~median(., na.rm = TRUE),
+        sd     = ~sd(., na.rm = TRUE),
+        min    = ~min(., na.rm = TRUE),
+        max    = ~max(., na.rm = TRUE)
+      ),
+      .names = "{.col}_{.fn}"
+      )
+    )
+  
+print("Main statistics for key numeric variables")
+main
+```
+
+
+### Distribution of variables
+``` {r distribution of variables}
+# Define custom colors for each variable
+custom_colors <- c("Age" = "#1f77b4", "BMI" = "#ff7f0e", "GenHlth" = "#2ca02c",
+                   "MentHlth" = "#d62728", "PhysHlth" = "#9467bd")
+
+# Loop through each variable
+for (var in numerical_var) {
+  
+  # Create histogram data manually to find tallest bin
+  hist_data <- data %>%
+    dplyr::select(all_of(var)) %>%   # <--- FIXED: Added dplyr:: to avoid error
+    rename(value = all_of(var)) %>%
+    mutate(bin = cut(value, breaks = 30)) %>%
+    count(bin) %>%
+    mutate(bin_mid = as.numeric(sub("\\((.+),.*", "\\1", bin)) + 
+                      (as.numeric(sub(".*,(.+)\\]", "\\1", bin)) - 
+                       as.numeric(sub("\\((.+),.*", "\\1", bin))) / 2)
+  
+  # Identify tallest bin
+  max_count <- max(hist_data$n)
+  
+  # Plot
+  p <- ggplot(hist_data, aes(x = bin_mid, y = n)) +
+    geom_col(aes(fill = n == max_count), color = "black", width = 1) +
+    scale_fill_manual(values = c("TRUE" = "red", "FALSE" = custom_colors[[var]]), guide = "none") +
+    theme_minimal(base_size = 14) +
+    theme(
+      panel.grid = element_blank(),
+      axis.line = element_line(color = "black"),
+      axis.ticks = element_line(color = "black"),
+      plot.title = element_text(face = "bold", color = "#333333"),
+      axis.title = element_text(color = "#333333"),
+      axis.text = element_text(color = "#333333")
+    ) +
+    labs(
+      title = paste("Distribution of", var),
+      x = "Value",
+      y = "Count"
+    )
+  
+  print(p)
+}
+```
+
+
+##########################
+# (4) -- Data split
+##########################
+``` {r data split}
+# Data split 
+set.seed(123)
+
+#Split train 70,test 30
+train_index <- createDataPartition(data$Diabetes, p = 0.7, list = FALSE)
+
+train_raw <- data[train_index, ]
+test_raw  <- data[-train_index, ]
+
+
+#Trainig labels
+# x_train <- select(train_raw, -Diabetes)
+y_train <- train_raw$Diabetes
+
+#Testing
+# x_test <- select(test_raw, -Diabetes)
+y_test <- test_raw$Diabetes
+```
+
+# Part 2 - 5 Different methods
+
+## A - Computing metrics
+``` {r get metrics}
+get_metrics_from_caret <- function(model, test_data, test_y, model_name) {
+  
+  # 1. Predict Probabilities
+  probs <- tryCatch({
+    predict(model, newdata = test_data, type = "prob")[, "Yes"]
+  }, error = function(e) {
+    return(NULL) 
+  })
+
+  # Predict Classes
+  preds <- predict(model, newdata = test_data)
+  
+#Force level to match
+  # Ensure the Truth is a factor
+  if(!is.factor(test_y)) test_y <- as.factor(test_y)
+  
+  # Ensure Predictions are a factor with the EXACT same levels as Truth
+  # This fixes the "levels" error
+  preds <- factor(preds, levels = levels(test_y))
+  # --------------------------------------
+
+  # 3. Confusion Matrix
+  cm <- confusionMatrix(preds, test_y, positive = "Yes")
+  
+  # 4. ROC and AUC (Only if probabilities exist)
+  if(!is.null(probs)) {
+    roc_obj <- roc(response = test_y, predictor = probs, levels = c("No", "Yes"))
+    auc_val <- auc(roc_obj)
+  } else {
+    roc_obj <- NULL
+    auc_val <- NA
+  }
+  
+  list(name = model_name, cm = cm, roc = roc_obj, auc = auc_val)
+}
+```
+
+# B- CV
+```{r model training with CV}
+# 5-fold CV, returning Class Probabilities for ROC calculation
+train_control <- trainControl(method = "cv", 
+                              number = 5, 
+                              classProbs = TRUE, 
+                              summaryFunction = twoClassSummary)
+```
+
+
+##########################
+# (4) -- Logistic regression
+##########################
+``` {r logistic regression model}
+#Single logistic regression interpretation
+# logistic_regression_model <- glm(Diabetes ~.,data = train_raw,family = binomial)
+
+#Predict, handle cv, resample, to later compare with other models
+logistic_regression_model <- train(Diabetes ~., data = train_raw,method='glm', family = 'binomial', trControl = train_control, metric ="ROC")
+
+logistic_regression_model
+
+#Coeff tables
+# summary(logistic_regression_model)
+
+```
+
+## Odd ratio
+``` {r odd ratio lr}
+#Coeff
+final_lr <- logistic_regression_model$finalModel
+
+#OR
+odd_ratio_tbl <- exp(cbind(OR=coef(final_lr), confint(final_lr)))
+                           
+print('Odds Ratios (OR) and 95% Confidence Intervals:')
+print(head(odd_ratio_tbl, 17))
+```
+
+
+
+
+
+
+####################################
+# (5) -- SVM (radial) on scale predictor
+####################################
+``` {r svm radial model}
+set.seed(123)
+
+# Create a smaller subset for training (e.g., 5,000 rows)
+svm_index <- createDataPartition(train_raw$Diabetes, p = 0.1, list = FALSE) 
+train_svm_small <- train_raw[svm_index, ]
+
+#Train the model on this smaller set
+# define a specific grid to avoid extreme parameters that cause errors.
+svm_grid <- expand.grid(sigma = c(0.01, 0.05, 0.1),
+                        C = c(0.1, 1, 10))
+
+print("Starting SVM Training on subset...")
+
+svm_model <- train(Diabetes ~ ., 
+                   data = train_svm_small,  
+                   method = "svmRadial", 
+                   trControl = train_control, 
+                   preProcess = c("center", "scale"),
+                   tuneGrid = svm_grid,    
+                   metric = "ROC")
+
+print(svm_model)
+print("SVM Training Done.")
+
+#Predict on scaled test data
+# svm_pred <- predict(svm_model, newdata = test_scaled, probability =TRUE)
+```
+
+
+
+
+##########################
+# (6) -- Decision Tree
+##########################
+``` {r decision tree model}
+set.seed(123)
+#Fit decision tree model
+tree_model <- train(
+  Diabetes ~ .,
+  data = train_raw,
+  method = "rpart",
+  trControl = train_control,
+  tuneLength = 10,
+  metric='ROC'
+)
+
+# Print complexity parameter table to see overfitting control
+# printcp(tree_model)
+
+print(tree_model)
+
+#Plot accuracy vs CP
+plot(tree_model) 
+```
+
+
+
+
+##########################
+# (7) -- Random Forest
+##########################
+``` {r random forest model}
+set.seed(123)
+# RF can be computationally expensive. Tuning a small grid for demonstration.
+rf_grid <- expand.grid(mtry = c(2, 4, 6, 8))
+
+#Fit rf model
+# rf_model <- randomForest(Diabetes ~ ., data = train_raw, ntree = 500,importance = TRUE)
+rf_model <- train(Diabetes ~., data = train_raw, method = 'rf', trControl = train_control, tuneGrid = rf_grid, 
+                  ntree = 100 ) # Could go to 500, but takes more time
+print(rf_model)
+```
+
+## Plot of variable important
+``` {r plot of var important on rf}
+varImpPlot(rf_model$finalModel, main = "Random forest variable importance")
+```
+
+
+
+##########################
+# (8) -- Naives Bayes
+##########################
+``` {r naives bayes model}
+set.seed(123)
+
+#Test odd k from 3 to 21 to pick the best one
+knn_grid <- expand.grid(k=seq(3,21,by=2)) 
+
+# Naive Bayes is simple and fast - no complex tuning grid needed
+naives_bayes_model <- train(Diabetes ~ ., 
+                  data = train_raw, 
+                  method = "nb", 
+                  trControl = train_control, 
+                  metric = "ROC")
+
+print(naives_bayes_model)
+```
+
+## Plot Naives Bayes
+``` {r plot naives bayes model}
+plot(naives_bayes_model, main = "Naive Bayes Performance Tuning")
+
+#Show the variable densities
+plot(naives_bayes_model$finalModel, vars = c("GenHlth", "HighBP","BMI","Age","HighChol"), legendplot = TRUE)
+
+```
+
+
+# Part 3
+## Metric Results on Test Data
+```{r metric results}
+results_logistic_regression <- get_metrics_from_caret(logistic_regression_model, test_raw, y_test, "Logistic Regression")
+results_svm   <- get_metrics_from_caret(svm_model,   test_raw, y_test, "SVM Radial")
+results_tree  <- get_metrics_from_caret(tree_model,  test_raw, y_test, "Decision Tree")
+results_rf    <- get_metrics_from_caret(rf_model,    test_raw, y_test, "Random Forest")
+results_nb <- get_metrics_from_caret(naives_bayes_model, test_raw, y_test, "Naive Bayes")
+
+
+
+```
+
+## Models Performance
+``` {r Confusion matrcies}
+# Compile metrics into a dataframe
+model_comparison <- data.frame(
+  Model = c("Logistic Regression", "SVM Radial", "Decision Tree", "Random Forest", "Naives Bayes"),
+  Accuracy = c(results_logistic_regression$cm$overall["Accuracy"], 
+               results_svm$cm$overall["Accuracy"], 
+               results_tree$cm$overall["Accuracy"], 
+               results_rf$cm$overall["Accuracy"], 
+               results_nb$cm$overall["Accuracy"]),
+  Sensitivity = c(results_logistic_regression$cm$byClass["Sensitivity"], 
+                  results_svm$cm$byClass["Sensitivity"], 
+                  results_tree$cm$byClass["Sensitivity"], 
+                  results_rf$cm$byClass["Sensitivity"], 
+                  results_nb$cm$byClass["Sensitivity"]),
+  Specificity = c(results_logistic_regression$cm$byClass["Specificity"], 
+                  results_svm$cm$byClass["Specificity"], 
+                  results_tree$cm$byClass["Specificity"], 
+                  results_rf$cm$byClass["Specificity"], 
+                  results_nb$cm$byClass["Specificity"]),
+  AUC = c(results_logistic_regression$auc, results_svm$auc, results_tree$auc, results_rf$auc, results_nb$auc)
+)
+
+print(model_comparison)
+```
+
+# Plot ROC curve for all 5 models
+```{r Plot only models where ROC object is available}
+# Plot ROC curves (Fixed Variable Names)
+plot(results_logistic_regression$roc, col = "dodgerblue3", lwd = 2, lty = 1,
+     main = "ROC curves for all models")
+plot(results_svm$roc,  col = "red",   lwd = 1, lty = 2262, add = TRUE)
+plot(results_tree$roc, col = "green", lwd = 2, lty = 3, add = TRUE)
+plot(results_rf$roc,   col = "hotpink",       lwd = 2, lty = 1342, add = TRUE)
+plot(results_nb$roc,   col = "brown",       lwd = 2, lty = 6, add = TRUE)
+
+# Add legend with both color and line type
+legend("bottomright",
+  legend = c("Logistic", "SVM radial", "Decision tree", "Random forest", "Naives Bayes"),
+  col    = c("dodgerblue3", "red", "green", "hotpink", "brown"),
+  lwd    = 2,
+  lty    = c(1, 2262, 3, 1342, 6)
+)
+
+```
+
+
+##Save all 5 models for R shiny
+``` {r deploy}
+# Create a folder for models if it doesn't exist
+dir.create("models", showWarnings = FALSE)
+
+# Save each trained caret model
+saveRDS(logistic_regression_model, "models/logit_model.rds")
+saveRDS(svm_model, "models/svm_model.rds")
+saveRDS(tree_model, "models/tree_model.rds")
+saveRDS(rf_model, "models/rf_model.rds")
+saveRDS(naives_bayes_model, "models/nb_model.rds")
+
+print("All models saved successfully to the 'models' folder.")
+
+```
